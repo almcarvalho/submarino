@@ -15,5 +15,10 @@ https://www.instagram.com/reel/DOUQZOfEjcz/?igsh=MTh3YWRyd2Uybjlndw==
 
 ![IMG_0129](https://github.com/user-attachments/assets/ab290d2d-909e-4486-af61-e30b622578a2)
 
+Compre componentes na robocore.net
+Use nosso cupom de desconto LCSISTEMAS
+e ganhe 5% de desconto nos produtos 
+originais robocore.
+
 
 
