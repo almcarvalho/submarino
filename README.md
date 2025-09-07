@@ -7,3 +7,13 @@ Dica: Começa pelo blink project, coloca um led pra piscar na porta 14 ou 16 do 
 
 
 ![unnamed](https://github.com/user-attachments/assets/5037a72d-67b5-4108-8a3a-a01afdef3f20)
+
+
+https://www.instagram.com/reel/DOUQZOfEjcz/?igsh=MTh3YWRyd2Uybjlndw==
+
+![IMG_0130](https://github.com/user-attachments/assets/4561edda-514f-4930-9302-5b1a808eed5a)
+
+![IMG_0129](https://github.com/user-attachments/assets/ab290d2d-909e-4486-af61-e30b622578a2)
+
+
+
