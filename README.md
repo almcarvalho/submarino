@@ -15,6 +15,10 @@ https://www.instagram.com/reel/DOUQZOfEjcz/?igsh=MTh3YWRyd2Uybjlndw==
 
 ![IMG_0129](https://github.com/user-attachments/assets/ab290d2d-909e-4486-af61-e30b622578a2)
 
+Tampa:
+<img width="1526" height="1038" alt="image" src="https://github.com/user-attachments/assets/949387ba-ed07-4bd1-b469-523ae18a39e2" />
+
+
 Compre componentes na robocore.net
 Use nosso cupom de desconto LCSISTEMAS
 e ganhe 5% de desconto nos produtos 
