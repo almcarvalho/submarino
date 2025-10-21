@@ -1,3 +1,4 @@
 ..
 Download > sketch > import from libray > seleciona o .zip baixado do github referente a lib LoRa.
-https://github.com/sandeepmistry/arduino-LoRa
+
+LoRa_E32
