@@ -1,0 +1,330 @@
+// LED VERMELHO (GPIO 14): status de conexão
+// LED VERDE (GPIO 16): aceso se QUALQUER relé estiver ligado; apagado se TODOS estiverem desligados.
+// Relés independentes:
+//   X         -> GPIO 18
+//   QUADRADO  -> GPIO 19
+//   TRIANGULO -> GPIO 32
+//   BOLA      -> GPIO 33
+//
+// Regras:
+// - Quando iniciar: todos os relés desligados.
+// - Caso perca o sinal do controle: desliga todos e liga apenas o GPIO 32 (TRIANGULO).
+//
+// Servos:
+// - Analógico esquerdo controla o servo da porta no pino D26.
+// - Analógico direito controla o servo da porta no pino D27.
+// - L1 / R1 trimmam o servo ESQUERDO.
+// - Setas ESQUERDA / DIREITA trimmam o servo DIREITO.
+
+#include <ps5Controller.h>
+#include <ESP32Servo.h>   // ou <Servo.h> se preferir e tiver suporte
+
+// LEDs
+#define LED_VERMELHO 14
+#define LED_VERDE    16
+
+// Pinos dos RELÉS
+#define RELE_X_PIN        18  // X
+#define RELE_QUAD_PIN     19  // QUADRADO
+#define RELE_TRI_PIN      32  // TRIÂNGULO
+#define RELE_BOL_PIN      33  // BOLA
+
+// Servos
+#define SERVO_ESQ_PIN     26  // analógico esquerdo
+#define SERVO_DIR_PIN     27  // analógico direito
+#define SERVO_MIN_US      500
+#define SERVO_MAX_US      2500
+
+Servo servoEsq;
+Servo servoDir;
+
+// === VARIÁVEIS DE CONTROLE DOS CANAIS (RELÉS) ===
+bool canal1Ligado = false; // X
+bool canal2Ligado = false; // QUADRADO
+bool canal3Ligado = false; // TRIÂNGULO (GPIO 32)
+bool canal4Ligado = false; // BOLA
+
+// Atualiza LED verde conforme estado dos relés
+void updateLedVerdeFromRelays() {
+  bool algumLigado = canal1Ligado || canal2Ligado || canal3Ligado || canal4Ligado;
+  digitalWrite(LED_VERDE, algumLigado ? HIGH : LOW);
+}
+
+// Aplica o estado atual das variáveis nos pinos dos relés
+void aplicarEstadosNosRelees() {
+  digitalWrite(RELE_X_PIN,    canal1Ligado ? HIGH : LOW);
+  digitalWrite(RELE_QUAD_PIN, canal2Ligado ? HIGH : LOW);
+  digitalWrite(RELE_TRI_PIN,  canal3Ligado ? HIGH : LOW);
+  digitalWrite(RELE_BOL_PIN,  canal4Ligado ? HIGH : LOW);
+  updateLedVerdeFromRelays();
+}
+
+// Helper: desliga todos os canais
+void desligarTodosCanais() {
+  canal1Ligado = canal2Ligado = canal3Ligado = canal4Ligado = false;
+  aplicarEstadosNosRelees();
+  Serial.println("Todos os canais OFF");
+}
+
+// Helper: liga apenas um canal (modo exclusivo)
+void setCanalExclusivo(uint8_t canal) {
+  canal1Ligado = canal2Ligado = canal3Ligado = canal4Ligado = false;
+
+  switch (canal) {
+    case 1: canal1Ligado = true; break; // X
+    case 2: canal2Ligado = true; break; // QUADRADO
+    case 3: canal3Ligado = true; break; // TRIÂNGULO
+    case 4: canal4Ligado = true; break; // BOLA
+  }
+
+  aplicarEstadosNosRelees();
+  Serial.printf("Canal %u -> ON (exclusivo)\n", canal);
+}
+
+// === Config do analógico (servos) ===
+const int DEADZONE = 10;
+const int SERVO_MIN_ANGLE = 0;
+const int SERVO_MAX_ANGLE = 180;
+const int MAX_STEP = 4;
+
+// Trim
+const int TRIM_STEP = 2;      // quantos graus por clique
+const int TRIM_MIN  = -45;    // limite mínimo de trim
+const int TRIM_MAX  =  45;    // limite máximo de trim
+
+int lastAngleEsq = 90;
+int lastAngleDir = 90;
+
+// offsets de trim (em graus)
+int trimEsq = 0;
+int trimDir = 0;
+
+int analogToAngle(int v) {
+  if (abs(v) < DEADZONE) v = 0;    // zona morta
+  float n = (float)v / 127.0f;     // -1.0 a +1.0
+  int angle = (int)(90.0f + n * 90.0f); // mapeia para 0..180
+
+  if (angle < SERVO_MIN_ANGLE) angle = SERVO_MIN_ANGLE;
+  if (angle > SERVO_MAX_ANGLE) angle = SERVO_MAX_ANGLE;
+  return angle;
+}
+
+int clampAngle(int angle) {
+  if (angle < SERVO_MIN_ANGLE) angle = SERVO_MIN_ANGLE;
+  if (angle > SERVO_MAX_ANGLE) angle = SERVO_MAX_ANGLE;
+  return angle;
+}
+
+int smoothStep(int current, int target, int maxStep) {
+  if (target > current) return min(current + maxStep, target);
+  if (target < current) return max(current - maxStep, target);
+  return current;
+}
+
+// === ESTADOS ANTERIORES (para detectar borda de subida) ===
+bool prevX = false, prevS = false, prevT = false, prevC = false;
+bool prevL1 = false, prevR1 = false;
+bool prevLeft = false, prevRight = false;
+
+// Trata botões do PS5 para modo exclusivo nos relés
+void handleRelayButtons() {
+  if (!ps5.isConnected()) return;
+
+  bool xNow = ps5.Cross();
+  bool sNow = ps5.Square();
+  bool tNow = ps5.Triangle();
+  bool cNow = ps5.Circle();
+
+  // X -> canal 1
+  if (xNow && !prevX) {
+    if (canal1Ligado) {
+      desligarTodosCanais();      // toggle do mesmo canal -> desliga tudo
+    } else {
+      setCanalExclusivo(1);       // liga 1 e garante exclusividade
+    }
+  }
+
+  // QUADRADO -> canal 2
+  if (sNow && !prevS) {
+    if (canal2Ligado) {
+      desligarTodosCanais();
+    } else {
+      setCanalExclusivo(2);
+    }
+  }
+
+  // TRIANGULO -> canal 3
+  if (tNow && !prevT) {
+    if (canal3Ligado) {
+      desligarTodosCanais();
+    } else {
+      setCanalExclusivo(3);
+    }
+  }
+
+  // BOLA -> canal 4
+  if (cNow && !prevC) {
+    if (canal4Ligado) {
+      desligarTodosCanais();
+    } else {
+      setCanalExclusivo(4);
+    }
+  }
+
+  prevX = xNow;
+  prevS = sNow;
+  prevT = tNow;
+  prevC = cNow;
+}
+
+// Trata TRIM dos servos (L1/R1 e setas)
+void handleTrimButtons() {
+  if (!ps5.isConnected()) return;
+
+  bool l1Now    = ps5.L1();
+  bool r1Now    = ps5.R1();
+  bool leftNow  = ps5.Left();
+  bool rightNow = ps5.Right();
+
+  // --- Trim do servo esquerdo (L1 / R1) ---
+  if (l1Now && !prevL1) {
+    trimEsq -= TRIM_STEP;
+  }
+  if (r1Now && !prevR1) {
+    trimEsq += TRIM_STEP;
+  }
+
+  // limita trim esquerdo
+  if (trimEsq < TRIM_MIN) trimEsq = TRIM_MIN;
+  if (trimEsq > TRIM_MAX) trimEsq = TRIM_MAX;
+
+  // --- Trim do servo direito (setas ESQ / DIR) ---
+  if (leftNow && !prevLeft) {
+    trimDir -= TRIM_STEP;
+  }
+  if (rightNow && !prevRight) {
+    trimDir += TRIM_STEP;
+  }
+
+  // limita trim direito
+  if (trimDir < TRIM_MIN) trimDir = TRIM_MIN;
+  if (trimDir > TRIM_MAX) trimDir = TRIM_MAX;
+
+  // Atualiza estados anteriores
+  prevL1    = l1Now;
+  prevR1    = r1Now;
+  prevLeft  = leftNow;
+  prevRight = rightNow;
+
+  // Debug opcional
+  if (l1Now || r1Now || leftNow || rightNow) {
+    Serial.print("Trim ESQ: ");
+    Serial.print(trimEsq);
+    Serial.print(" | Trim DIR: ");
+    Serial.println(trimDir);
+  }
+}
+
+// Track da conexão para acionar desligamento só na transição
+bool estavaConectado = false;
+
+void setup() {
+  Serial.begin(9600);
+
+  // LEDs
+  pinMode(LED_VERMELHO, OUTPUT);
+  pinMode(LED_VERDE, OUTPUT);
+  digitalWrite(LED_VERMELHO, LOW);
+  digitalWrite(LED_VERDE, LOW);
+
+  // Relés
+  pinMode(RELE_X_PIN,    OUTPUT);
+  pinMode(RELE_QUAD_PIN, OUTPUT);
+  pinMode(RELE_TRI_PIN,  OUTPUT);
+  pinMode(RELE_BOL_PIN,  OUTPUT);
+
+  // Todos os relés iniciam desligados
+  desligarTodosCanais();
+
+  // Servos
+  servoEsq.attach(SERVO_ESQ_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  servoDir.attach(SERVO_DIR_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  servoEsq.write(lastAngleEsq);
+  servoDir.write(lastAngleDir);
+
+  // PS5
+  ps5.begin("58:10:31:bd:52:38");
+  Serial.println("Pronto para conectar ao controle PS5...");
+}
+
+void loop() {
+  bool conectado = ps5.isConnected();
+
+  if (conectado) {
+    if (!estavaConectado) {
+      Serial.println("Controle conectado");
+    }
+    estavaConectado = true;
+
+    // LED vermelho aceso quando conectado
+    digitalWrite(LED_VERMELHO, HIGH);
+
+    // ---- TRIM FIRST ----
+    handleTrimButtons();
+
+    // Analógico esquerdo -> servo em D26 (com trim)
+    int lx = ps5.LStickX();
+    int targetAngleEsq = analogToAngle(lx) + trimEsq;
+    targetAngleEsq = clampAngle(targetAngleEsq);
+    lastAngleEsq = smoothStep(lastAngleEsq, targetAngleEsq, MAX_STEP);
+    servoEsq.write(lastAngleEsq);
+
+    // Analógico direito -> servo em D27 (com trim)
+    int rx = ps5.RStickX();
+    int targetAngleDir = analogToAngle(rx) + trimDir;
+    targetAngleDir = clampAngle(targetAngleDir);
+    lastAngleDir = smoothStep(lastAngleDir, targetAngleDir, MAX_STEP);
+    servoDir.write(lastAngleDir);
+
+    // Botões -> relés
+    handleRelayButtons();
+
+    delay(10);
+  } else {
+    // Se acabou de perder a conexão, trata evento de perda de sinal
+    if (estavaConectado) {
+      Serial.println("Controle desconectado - desligando todos os canais e ligando GPIO 32 (TRIANGULO)");
+
+      // Desliga todos
+      desligarTodosCanais();
+
+      // Liga apenas o canal 3 (GPIO 32)
+      canal3Ligado = true;
+      aplicarEstadosNosRelees();
+
+      // Evita falsos toggles no retorno
+      prevX = prevS = prevT = prevC = false;
+      prevL1 = prevR1 = prevLeft = prevRight = false;
+    }
+    estavaConectado = false;
+
+    // LED vermelho piscando enquanto desconectado
+    digitalWrite(LED_VERMELHO, HIGH);
+    delay(300);
+    digitalWrite(LED_VERMELHO, LOW);
+    delay(300);
+
+    // Retorna servos suavemente ao "centro + trim"
+    int targetEsqSemControle = clampAngle(90 + trimEsq);
+    int targetDirSemControle = clampAngle(90 + trimDir);
+
+    if (lastAngleEsq != targetEsqSemControle) {
+      lastAngleEsq = smoothStep(lastAngleEsq, targetEsqSemControle, MAX_STEP);
+      servoEsq.write(lastAngleEsq);
+    }
+    if (lastAngleDir != targetDirSemControle) {
+      lastAngleDir = smoothStep(lastAngleDir, targetDirSemControle, MAX_STEP);
+      servoDir.write(lastAngleDir);
+    }
+  }
+}
