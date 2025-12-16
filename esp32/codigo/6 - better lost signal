@@ -28,7 +28,7 @@ bool canal3Ligado = false; // TRIÂNGULO
 bool canal4Ligado = false;
 
 // ===== timer de reboot após desconexão =====
-const uint32_t REBOOT_SEM_CONTROLE_MS = 10000; // 10s
+const uint32_t REBOOT_SEM_CONTROLE_MS = 18000; //tempo em segundos
 uint32_t desconectadoDesdeMs = 0;
 bool timerRebootAtivo = false;
 
