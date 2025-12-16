@@ -1,0 +1,317 @@
+#include <ps5Controller.h>
+#include <ESP32Servo.h>
+#include <esp_system.h>
+
+// LEDs
+#define LED_VERMELHO 14 // indicador de carga
+#define LED_VERDE    16 // indicador de conexão
+
+// Pinos dos RELÉS
+#define RELE_X_PIN        18  // X
+#define RELE_QUAD_PIN     19  // QUADRADO
+#define RELE_TRI_PIN      32  // TRIÂNGULO (FAILSAFE)
+#define RELE_BOL_PIN      33  // BOLA
+
+// Servos
+#define SERVO_ESQ_PIN     26
+#define SERVO_DIR_PIN     27
+#define SERVO_MIN_US      500
+#define SERVO_MAX_US      2500
+
+Servo servoEsq;
+Servo servoDir;
+
+// === VARIÁVEIS DE CONTROLE DOS CANAIS (RELÉS) ===
+bool canal1Ligado = false;
+bool canal2Ligado = false;
+bool canal3Ligado = false; // TRIÂNGULO
+bool canal4Ligado = false;
+
+// ===== timer de reboot após desconexão =====
+const uint32_t REBOOT_SEM_CONTROLE_MS = 10000; // 10s
+uint32_t desconectadoDesdeMs = 0;
+bool timerRebootAtivo = false;
+
+// ===== FAILSAFE TRIÂNGULO (millis): 3s ON / 5s OFF =====
+const uint32_t FAILSAFE_TRI_ON_MS  = 3000;
+const uint32_t FAILSAFE_TRI_OFF_MS = 5000;
+uint32_t failsafeTriTrocaMs = 0;
+bool failsafeTriAtivo = false;      // se estamos no modo failsafe
+bool failsafeTriLigado = false;     // estado atual do TRI (ON/OFF)
+// =======================================================
+
+void updateLedVerdeFromRelays() {
+  bool algumLigado = canal1Ligado || canal2Ligado || canal3Ligado || canal4Ligado;
+  digitalWrite(LED_VERDE, algumLigado ? HIGH : LOW);
+}
+
+void aplicarEstadosNosRelees() {
+  digitalWrite(RELE_X_PIN,    canal1Ligado ? HIGH : LOW);
+  digitalWrite(RELE_QUAD_PIN, canal2Ligado ? HIGH : LOW);
+  digitalWrite(RELE_TRI_PIN,  canal3Ligado ? HIGH : LOW);
+  digitalWrite(RELE_BOL_PIN,  canal4Ligado ? HIGH : LOW);
+  updateLedVerdeFromRelays();
+}
+
+void desligarTodosCanais() {
+  canal1Ligado = canal2Ligado = canal3Ligado = canal4Ligado = false;
+  aplicarEstadosNosRelees();
+  Serial.println("Todos os canais OFF");
+}
+
+void setCanalExclusivo(uint8_t canal) {
+  canal1Ligado = canal2Ligado = canal3Ligado = canal4Ligado = false;
+
+  switch (canal) {
+    case 1: canal1Ligado = true; break;
+    case 2: canal2Ligado = true; break;
+    case 3: canal3Ligado = true; break;
+    case 4: canal4Ligado = true; break;
+  }
+
+  aplicarEstadosNosRelees();
+  Serial.printf("Canal %u -> ON (exclusivo)\n", canal);
+}
+
+const int DEADZONE = 10;
+const int SERVO_MIN_ANGLE = 0;
+const int SERVO_MAX_ANGLE = 180;
+const int MAX_STEP = 4;
+
+const int TRIM_STEP = 2;
+const int TRIM_MIN  = -45;
+const int TRIM_MAX  =  45;
+
+int lastAngleEsq = 90;
+int lastAngleDir = 90;
+
+int trimEsq = 0;
+int trimDir = 0;
+
+int analogToAngle(int v) {
+  if (abs(v) < DEADZONE) v = 0;
+  float n = (float)v / 127.0f;
+  int angle = (int)(90.0f + n * 90.0f);
+
+  if (angle < SERVO_MIN_ANGLE) angle = SERVO_MIN_ANGLE;
+  if (angle > SERVO_MAX_ANGLE) angle = SERVO_MAX_ANGLE;
+  return angle;
+}
+
+int clampAngle(int angle) {
+  if (angle < SERVO_MIN_ANGLE) angle = SERVO_MIN_ANGLE;
+  if (angle > SERVO_MAX_ANGLE) angle = SERVO_MAX_ANGLE;
+  return angle;
+}
+
+int smoothStep(int current, int target, int maxStep) {
+  if (target > current) return min(current + maxStep, target);
+  if (target < current) return max(current - maxStep, target);
+  return current;
+}
+
+bool prevX = false, prevS = false, prevT = false, prevC = false;
+bool prevL1 = false, prevR1 = false;
+bool prevLeft = false, prevRight = false;
+
+void handleRelayButtons() {
+  if (!ps5.isConnected()) return;
+
+  bool xNow = ps5.Cross();
+  bool sNow = ps5.Square();
+  bool tNow = ps5.Triangle();
+  bool cNow = ps5.Circle();
+
+  if (xNow && !prevX) {
+    if (canal1Ligado) desligarTodosCanais();
+    else setCanalExclusivo(1);
+  }
+
+  if (sNow && !prevS) {
+    if (canal2Ligado) desligarTodosCanais();
+    else setCanalExclusivo(2);
+  }
+
+  if (tNow && !prevT) {
+    if (canal3Ligado) desligarTodosCanais();
+    else setCanalExclusivo(3);
+  }
+
+  if (cNow && !prevC) {
+    if (canal4Ligado) desligarTodosCanais();
+    else setCanalExclusivo(4);
+  }
+
+  prevX = xNow;
+  prevS = sNow;
+  prevT = tNow;
+  prevC = cNow;
+}
+
+void handleTrimButtons() {
+  if (!ps5.isConnected()) return;
+
+  bool l1Now    = ps5.L1();
+  bool r1Now    = ps5.R1();
+  bool leftNow  = ps5.Left();
+  bool rightNow = ps5.Right();
+
+  if (l1Now && !prevL1) trimEsq -= TRIM_STEP;
+  if (r1Now && !prevR1) trimEsq += TRIM_STEP;
+
+  if (trimEsq < TRIM_MIN) trimEsq = TRIM_MIN;
+  if (trimEsq > TRIM_MAX) trimEsq = TRIM_MAX;
+
+  if (leftNow && !prevLeft) trimDir -= TRIM_STEP;
+  if (rightNow && !prevRight) trimDir += TRIM_STEP;
+
+  if (trimDir < TRIM_MIN) trimDir = TRIM_MIN;
+  if (trimDir > TRIM_MAX) trimDir = TRIM_MAX;
+
+  prevL1    = l1Now;
+  prevR1    = r1Now;
+  prevLeft  = leftNow;
+  prevRight = rightNow;
+}
+
+// Track da conexão
+bool estavaConectado = false;
+
+// ===== FUNÇÕES DO FAILSAFE TRIÂNGULO =====
+void iniciarFailsafeTri(uint32_t agora) {
+  failsafeTriAtivo = true;
+  failsafeTriLigado = true;          // começa ON
+  canal3Ligado = true;
+  aplicarEstadosNosRelees();
+  failsafeTriTrocaMs = agora + FAILSAFE_TRI_ON_MS;
+}
+
+void pararFailsafeTri() {
+  failsafeTriAtivo = false;
+  failsafeTriLigado = false;
+  canal3Ligado = false;              // ao reconectar, desliga TRI
+  aplicarEstadosNosRelees();
+}
+
+void atualizarFailsafeTri(uint32_t agora) {
+  if (!failsafeTriAtivo) return;
+
+  if ((int32_t)(agora - failsafeTriTrocaMs) >= 0) {
+    // troca ON <-> OFF
+    failsafeTriLigado = !failsafeTriLigado;
+    canal3Ligado = failsafeTriLigado;
+    aplicarEstadosNosRelees();
+
+    // agenda próxima troca
+    failsafeTriTrocaMs = agora + (failsafeTriLigado ? FAILSAFE_TRI_ON_MS : FAILSAFE_TRI_OFF_MS);
+  }
+}
+// =========================================
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(LED_VERMELHO, OUTPUT);
+  pinMode(LED_VERDE, OUTPUT);
+  digitalWrite(LED_VERMELHO, LOW);
+  digitalWrite(LED_VERDE, LOW);
+
+  pinMode(RELE_X_PIN,    OUTPUT);
+  pinMode(RELE_QUAD_PIN, OUTPUT);
+  pinMode(RELE_TRI_PIN,  OUTPUT);
+  pinMode(RELE_BOL_PIN,  OUTPUT);
+
+  desligarTodosCanais();
+
+  servoEsq.attach(SERVO_ESQ_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  servoDir.attach(SERVO_DIR_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  servoEsq.write(lastAngleEsq);
+  servoDir.write(lastAngleDir);
+
+  ps5.begin("58:10:31:bd:52:38");
+  Serial.println("Pronto para conectar ao controle PS5...");
+}
+
+void loop() {
+  bool conectado = ps5.isConnected();
+  uint32_t agora = millis();
+
+  if (conectado) {
+    if (!estavaConectado) {
+      Serial.println("Controle conectado");
+    }
+    estavaConectado = true;
+
+    // cancela reboot e FAILSAFE TRI ao reconectar
+    timerRebootAtivo = false;
+    if (failsafeTriAtivo) pararFailsafeTri();
+
+    digitalWrite(LED_VERMELHO, HIGH);
+
+    handleTrimButtons();
+
+    int lx = ps5.LStickX();
+    int targetAngleEsq = analogToAngle(lx) + trimEsq;
+    targetAngleEsq = clampAngle(targetAngleEsq);
+    lastAngleEsq = smoothStep(lastAngleEsq, targetAngleEsq, MAX_STEP);
+    servoEsq.write(lastAngleEsq);
+
+    int rx = ps5.RStickX();
+    int targetAngleDir = analogToAngle(rx) + trimDir;
+    targetAngleDir = clampAngle(targetAngleDir);
+    lastAngleDir = smoothStep(lastAngleDir, targetAngleDir, MAX_STEP);
+    servoDir.write(lastAngleDir);
+
+    handleRelayButtons();
+
+    delay(10);
+  } else {
+    // Se acabou de perder a conexão
+    if (estavaConectado) {
+      Serial.println("Controle desconectado - desligando todos os canais e iniciando FAILSAFE do TRIÂNGULO (3s ON / 5s OFF)");
+
+      desligarTodosCanais();
+
+      prevX = prevS = prevT = prevC = false;
+      prevL1 = prevR1 = prevLeft = prevRight = false;
+
+      // inicia contagem de 20s para reboot
+      desconectadoDesdeMs = agora;
+      timerRebootAtivo = true;
+
+      // inicia o padrão do TRIÂNGULO (millis)
+      iniciarFailsafeTri(agora);
+    }
+    estavaConectado = false;
+
+    // atualiza o padrão 3s ON / 5s OFF
+    atualizarFailsafeTri(agora);
+
+    // se ficar 20s desconectado, reinicia
+    if (timerRebootAtivo && (agora - desconectadoDesdeMs >= REBOOT_SEM_CONTROLE_MS)) {
+      Serial.println("20s sem conexão com o controle -> reiniciando ESP32...");
+      Serial.flush();
+      delay(50);
+      esp_restart();
+    }
+
+    // LED vermelho piscando enquanto desconectado
+    digitalWrite(LED_VERMELHO, HIGH);
+    delay(300);
+    digitalWrite(LED_VERMELHO, LOW);
+    delay(300);
+
+    // Retorna servos ao centro + trim
+    int targetEsqSemControle = clampAngle(90 + trimEsq);
+    int targetDirSemControle = clampAngle(90 + trimDir);
+
+    if (lastAngleEsq != targetEsqSemControle) {
+      lastAngleEsq = smoothStep(lastAngleEsq, targetEsqSemControle, MAX_STEP);
+      servoEsq.write(lastAngleEsq);
+    }
+    if (lastAngleDir != targetDirSemControle) {
+      lastAngleDir = smoothStep(lastAngleDir, targetDirSemControle, MAX_STEP);
+      servoDir.write(lastAngleDir);
+    }
+  }
+}
